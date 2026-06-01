@@ -1,0 +1,14 @@
+{
+  "name": "drivecheck2.0-backend",
+  "version": "0.1.0",
+  "private": true,
+  "description": "DriveCheck serverless backend (AWS SAM + Lambda + DynamoDB).",
+  "scripts": {
+    "build": "sam build",
+    "deploy:dev": "sam build && sam deploy --config-env dev",
+    "deploy:prod": "sam build && sam deploy --config-env prod",
+    "logs:ai": "sam logs -n AnalyzeImageFunction --stack-name drivecheck2-0-backend-dev --tail",
+    "logs:auth": "sam logs -n VerifyOtpFunction --stack-name drivecheck2-0-backend-dev --tail",
+    "logs:all": "sam logs --stack-name drivecheck2-0-backend-dev --tail"
+  }
+}

@@ -1,0 +1,99 @@
+name: drive_check
+description: DriveCheck2.0 — Cars24 AI Inspection Copilot
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: ^3.12.0
+
+dependencies:
+  flutter:
+    sdk: flutter
+  cupertino_icons: ^1.0.8
+
+  # State management
+  flutter_riverpod: ^2.5.1
+
+  # Navigation
+  go_router: ^14.2.7
+
+  # HTTP
+  dio: ^5.5.0
+
+  # Fonts
+  google_fonts: ^6.2.1
+
+  # Storage
+  shared_preferences: ^2.3.2
+
+  # Env
+  flutter_dotenv: ^5.1.0
+
+  # Date formatting
+  intl: ^0.19.0
+
+  # Camera
+  image_picker: ^1.1.2
+  camera: ^0.11.0+1
+  permission_handler: ^11.3.1
+
+  # Image processing (centre-crop the RC capture to the card-shaped viewport)
+  image: ^4.2.0
+
+  # Location — distance-to-pickup on home cards
+  geolocator: ^13.0.1
+
+  # Opening external URLs (Google Maps directions, etc.)
+  url_launcher: ^6.3.1
+
+  # Local push notifications (demo: mock incoming OTP SMS)
+  flutter_local_notifications: ^17.2.3
+
+  # Speech-to-text (user dictates name) — now via Whisper through our backend
+  record: ^7.0.0
+  path_provider: ^2.1.4
+
+  # Audio playback (per-language prompt files)
+  audioplayers: ^6.1.0
+
+  # Real-time inspection updates via AppSync GraphQL subscription
+  # (the home page's `inspectionsAsyncProvider` merges these into its
+  # cached list). Hand-rolled subscription client uses this directly
+  # rather than pulling in the full Amplify stack.
+  web_socket_channel: ^3.0.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+  # Generates platform launcher icons from a single source PNG.
+  flutter_launcher_icons: ^0.14.1
+
+
+flutter_launcher_icons:
+  android: "ic_launcher"
+  ios: true
+  remove_alpha_ios: true
+  image_path: "assets/icon/drivecheck-app-logo.png"
+  min_sdk_android: 21
+  adaptive_icon_background: "#FFFFFF"
+  adaptive_icon_foreground: "assets/icon/drivecheck-app-logo.png"
+  web:
+    generate: false
+  windows:
+    generate: false
+  macos:
+    generate: false
+
+
+flutter:
+  uses-material-design: true
+  assets:
+    - .env
+    - assets/images/
+    - assets/references/
+    - assets/audio/prompts/en/
+    - assets/audio/prompts/hi/
+    - assets/audio/prompts/te/
+    - assets/audio/prompts/bn/

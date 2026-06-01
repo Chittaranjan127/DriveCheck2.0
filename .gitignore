@@ -1,0 +1,60 @@
+# ===== OS / editor =====
+.DS_Store
+*.swp
+.idea/
+.vscode/
+*.iml
+
+# ===== Secrets (NEVER commit) =====
+.env
+*/.env
+**/.env
+!**/.env.example
+
+# =========================================================
+# Flutter app  (DriveCheck2.0/)
+# =========================================================
+DriveCheck2.0/build/
+DriveCheck2.0/.dart_tool/
+DriveCheck2.0/.flutter-plugins
+DriveCheck2.0/.flutter-plugins-dependencies
+DriveCheck2.0/.packages
+DriveCheck2.0/.pub-cache/
+DriveCheck2.0/.pub/
+DriveCheck2.0/**/*.g.dart
+DriveCheck2.0/**/*.freezed.dart
+DriveCheck2.0/coverage/
+DriveCheck2.0/devtools_options.yaml
+
+# Android
+DriveCheck2.0/android/.gradle/
+DriveCheck2.0/android/app/debug
+DriveCheck2.0/android/app/profile
+DriveCheck2.0/android/app/release
+DriveCheck2.0/android/local.properties
+DriveCheck2.0/android/key.properties
+DriveCheck2.0/android/**/GeneratedPluginRegistrant.*
+DriveCheck2.0/**/*.keystore
+DriveCheck2.0/**/*.jks
+
+# iOS / macOS
+DriveCheck2.0/ios/Pods/
+DriveCheck2.0/ios/.symlinks/
+DriveCheck2.0/ios/Flutter/Flutter.framework
+DriveCheck2.0/ios/Flutter/Flutter.podspec
+DriveCheck2.0/ios/Flutter/ephemeral/
+DriveCheck2.0/ios/Flutter/flutter_export_environment.sh
+DriveCheck2.0/ios/Flutter/Generated.xcconfig
+DriveCheck2.0/macos/Pods/
+DriveCheck2.0/macos/Flutter/ephemeral/
+
+# =========================================================
+# SAM / Node backend  (drivecheck2.0-backend/)
+# =========================================================
+drivecheck2.0-backend/.aws-sam/
+drivecheck2.0-backend/**/node_modules/
+drivecheck2.0-backend/node_modules/
+drivecheck2.0-backend/**/package-lock.json
+drivecheck2.0-backend/.env
+drivecheck2.0-backend/samconfig.local.toml
+drivecheck2.0-backend/**/*.zip

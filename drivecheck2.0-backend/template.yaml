@@ -1,0 +1,1050 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: DriveCheck backend — AI proxy + inspections CRUD.
+
+Parameters:
+  Stage:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, prod]
+  OwnerTag:
+    Type: String
+    Default: chittaranjan1998.das@gmail.com
+  JwtSecretValue:
+    Type: String
+    NoEcho: true
+    Default: ''
+    Description: Pass the JWT signing secret at deploy time to bypass Secrets Manager (used when SCP blocks runtime read). Leave empty to use Secrets Manager.
+  OpenAiApiKey:
+    Type: String
+    NoEcho: true
+    Default: ''
+    Description: Pass the OpenAI API key at deploy time to bypass Secrets Manager. Leave empty to use Secrets Manager.
+  ElevenLabsApiKey:
+    Type: String
+    NoEcho: true
+    Default: ''
+    Description: Pass the ElevenLabs API key at deploy time. Required for /ai/tts (spoken quality-reason playback in the inspection flow).
+
+Globals:
+  Function:
+    Runtime: nodejs20.x
+    MemorySize: 512
+    Timeout: 30
+    Architectures: [arm64]
+    Layers:
+      - !Ref UtilitiesLayer
+    Environment:
+      Variables:
+        STAGE: !Ref Stage
+        OPENAI_SECRET_ARN: !Ref OpenAiSecret
+        AUTH_SECRET_ARN: !Ref AuthSecret
+        INSPECTIONS_TABLE: !Ref InspectionsTable
+        INSPECTION_STEPS_TABLE: !Ref InspectionStepsTable
+        INSPECTION_TICKETS_TABLE: !Ref InspectionTicketsTable
+        INSPECTION_LEADS_TABLE: !Ref InspectionLeadsTable
+        USERS_TABLE: !Ref UsersTable
+        OTP_TABLE: !Ref UserOtpTable
+        SESSIONS_TABLE: !Ref UserSessionsTable
+        JWT_SECRET: !Ref JwtSecretValue
+        OPENAI_API_KEY: !Ref OpenAiApiKey
+        ELEVENLABS_API_KEY: !Ref ElevenLabsApiKey
+        SELFIES_BUCKET: !Ref SelfiesBucket
+        SELFIES_PUBLIC_BASE: !Sub "https://${SelfiesBucket}.s3.${AWS::Region}.amazonaws.com"
+  Api:
+    Cors:
+      AllowMethods: "'GET,POST,PUT,DELETE,OPTIONS'"
+      AllowHeaders: "'Content-Type,x-api-key'"
+      AllowOrigin: "'*'"
+
+Resources:
+
+  # ---------- Secrets ----------
+  OpenAiSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub drivecheck/${Stage}/openai
+      Description: OpenAI API key for DriveCheck AI lambdas.
+      SecretString: '{"OPENAI_API_KEY":"replace-me"}'
+      Tags:
+        - { Key: Owner, Value: !Ref OwnerTag }
+        - { Key: Project, Value: drivecheck }
+        - { Key: Env, Value: !Ref Stage }
+
+  AuthSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub drivecheck/${Stage}/auth
+      Description: JWT signing secret for DriveCheck auth.
+      GenerateSecretString:
+        SecretStringTemplate: '{}'
+        GenerateStringKey: JWT_SECRET
+        PasswordLength: 64
+        ExcludePunctuation: true
+      Tags:
+        - { Key: Owner, Value: !Ref OwnerTag }
+        - { Key: Project, Value: drivecheck }
+        - { Key: Env, Value: !Ref Stage }
+
+  # ---------- DynamoDB ----------
+  UsersTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub DriveCheck-Users-${Stage}
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: phoneNumber, AttributeType: S }
+      KeySchema:
+        - { AttributeName: phoneNumber, KeyType: HASH }
+      Tags:
+        - { Key: Owner, Value: !Ref OwnerTag }
+        - { Key: Project, Value: drivecheck }
+        - { Key: Env, Value: !Ref Stage }
+
+  UserOtpTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub DriveCheck-UserOTPManager-${Stage}
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: phoneNumber, AttributeType: S }
+      KeySchema:
+        - { AttributeName: phoneNumber, KeyType: HASH }
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+      Tags:
+        - { Key: Owner, Value: !Ref OwnerTag }
+        - { Key: Project, Value: drivecheck }
+        - { Key: Env, Value: !Ref Stage }
+
+  UserSessionsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub DriveCheck-UserSessions-${Stage}
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: sessionId, AttributeType: S }
+        - { AttributeName: phoneNumber, AttributeType: S }
+        - { AttributeName: lastSeenAt, AttributeType: S }
+      KeySchema:
+        - { AttributeName: sessionId, KeyType: HASH }
+      GlobalSecondaryIndexes:
+        - IndexName: byPhoneNumber
+          KeySchema:
+            - { AttributeName: phoneNumber, KeyType: HASH }
+            - { AttributeName: lastSeenAt, KeyType: RANGE }
+          Projection: { ProjectionType: ALL }
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+      Tags:
+        - { Key: Owner, Value: !Ref OwnerTag }
+        - { Key: Project, Value: drivecheck }
+        - { Key: Env, Value: !Ref Stage }
+
+  InspectionsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub DriveCheck-Inspections-${Stage}
+      # Real-time fan-out: every Inspection insert/update emits an event
+      # the PublishInspectionFunction picks up and pushes through AppSync.
+      # NEW_IMAGE keeps the payload small (we only need the post-state).
+      StreamSpecification:
+        StreamViewType: NEW_IMAGE
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: id, AttributeType: S }
+        - { AttributeName: assignedTo, AttributeType: S }
+        - { AttributeName: scheduledAt, AttributeType: S }
+      KeySchema:
+        - { AttributeName: id, KeyType: HASH }
+      GlobalSecondaryIndexes:
+        - IndexName: byAssignee
+          KeySchema:
+            - { AttributeName: assignedTo, KeyType: HASH }
+            - { AttributeName: scheduledAt, KeyType: RANGE }
+          Projection: { ProjectionType: ALL }
+      Tags:
+        - { Key: Owner, Value: !Ref OwnerTag }
+        - { Key: Project, Value: drivecheck }
+        - { Key: Env, Value: !Ref Stage }
+
+  # One row per (inspection, step). Seeded with all 13 step rows at
+  # createInspection time so a missing step row is always a bug, never a
+  # "haven't reached it yet" condition. PK + SK Query returns the full
+  # ordered list in a single page.
+  InspectionStepsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub DriveCheck-InspectionSteps-${Stage}
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: inspectionId, AttributeType: S }
+        - { AttributeName: stepId,       AttributeType: S }
+      KeySchema:
+        - { AttributeName: inspectionId, KeyType: HASH }
+        - { AttributeName: stepId,       KeyType: RANGE }
+      Tags:
+        - { Key: Owner, Value: !Ref OwnerTag }
+        - { Key: Project, Value: drivecheck }
+        - { Key: Env, Value: !Ref Stage }
+
+  # Closed-deal record. Written when the customer agrees to the AI-
+  # suggested price after the jockey reads out the report. Carries a
+  # frozen snapshot of the parent inspection + every step row so
+  # backoffice / procurement can process the lead without joining
+  # back to the live inspection tables. Same GSI pattern as tickets.
+  InspectionLeadsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub DriveCheck-InspectionLeads-${Stage}
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: id,           AttributeType: S }
+        - { AttributeName: inspectionId, AttributeType: S }
+        - { AttributeName: createdAt,    AttributeType: S }
+      KeySchema:
+        - { AttributeName: id, KeyType: HASH }
+      GlobalSecondaryIndexes:
+        - IndexName: byInspection
+          KeySchema:
+            - { AttributeName: inspectionId, KeyType: HASH }
+            - { AttributeName: createdAt,    KeyType: RANGE }
+          Projection: { ProjectionType: ALL }
+      Tags:
+        - { Key: Owner, Value: !Ref OwnerTag }
+        - { Key: Project, Value: drivecheck }
+        - { Key: Env, Value: !Ref Stage }
+
+  # Decision record written when the jockey reads the AI-generated
+  # report to the customer at the end of an inspection. One row per
+  # ticket. Hash key is the ticket id (uuid) so a single inspection
+  # can spawn multiple tickets (e.g. customer countered, jockey
+  # re-submitted with a different price after manager approval).
+  # `byInspection` GSI lets us pull every ticket linked to an
+  # inspection in a single Query.
+  InspectionTicketsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub DriveCheck-InspectionTickets-${Stage}
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: id,           AttributeType: S }
+        - { AttributeName: inspectionId, AttributeType: S }
+        - { AttributeName: createdAt,    AttributeType: S }
+      KeySchema:
+        - { AttributeName: id, KeyType: HASH }
+      GlobalSecondaryIndexes:
+        - IndexName: byInspection
+          KeySchema:
+            - { AttributeName: inspectionId, KeyType: HASH }
+            - { AttributeName: createdAt,    KeyType: RANGE }
+          Projection: { ProjectionType: ALL }
+      Tags:
+        - { Key: Owner, Value: !Ref OwnerTag }
+        - { Key: Project, Value: drivecheck }
+        - { Key: Env, Value: !Ref Stage }
+
+  # ---------- S3 ----------
+  # Single base bucket for all DriveCheck media. Organize content with
+  # folder prefixes (selfies/, inspections/, reports/, ...). Only selfies/
+  # is exposed publicly via the bucket policy below.
+  # Retain policies: once created, CloudFormation will never delete or
+  # replace this bucket — it survives stack deletes and template renames.
+  SelfiesBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub drivecheck-${Stage}-${AWS::AccountId}
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: false
+        IgnorePublicAcls: false
+        BlockPublicPolicy: false
+        RestrictPublicBuckets: false
+      OwnershipControls:
+        Rules: [{ ObjectOwnership: BucketOwnerEnforced }]
+      CorsConfiguration:
+        CorsRules:
+          - AllowedMethods: [GET]
+            AllowedOrigins: ["*"]
+            AllowedHeaders: ["*"]
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireOrphans
+            Status: Enabled
+            ExpirationInDays: 365
+      Tags:
+        - { Key: Owner, Value: !Ref OwnerTag }
+        - { Key: Project, Value: drivecheck }
+        - { Key: Env, Value: !Ref Stage }
+
+  SelfiesBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref SelfiesBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          # Hackathon convenience: selfies are stored under random-UUID keys
+          # and exposed via a permanent public URL so the Flutter client can
+          # render them without re-presigning. Tighten before prod.
+          - Sid: PublicReadSelfies
+            Effect: Allow
+            Principal: "*"
+            Action: s3:GetObject
+            Resource: !Sub "${SelfiesBucket.Arn}/selfies/*"
+          # Inspection step media (RC photo, exterior shots, etc.) are stored
+          # under random UUIDs and need to be loadable from the Flutter client
+          # and the inspector dashboard without re-presigning per request.
+          - Sid: PublicReadInspections
+            Effect: Allow
+            Principal: "*"
+            Action: s3:GetObject
+            Resource: !Sub "${SelfiesBucket.Arn}/inspections/*"
+
+  # ---------- Shared Lambda execution role ----------
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub drivecheck2-0-backend-${Stage}-lambda-exec
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: drivecheck-lambda-runtime
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource:
+                  - !Ref OpenAiSecret
+                  - !Ref AuthSecret
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                  - dynamodb:BatchGetItem
+                  - dynamodb:BatchWriteItem
+                Resource:
+                  - !GetAtt UsersTable.Arn
+                  - !GetAtt UserOtpTable.Arn
+                  - !GetAtt UserSessionsTable.Arn
+                  - !Sub "${UserSessionsTable.Arn}/index/*"
+                  - !GetAtt InspectionsTable.Arn
+                  - !Sub "${InspectionsTable.Arn}/index/*"
+                  - !GetAtt InspectionStepsTable.Arn
+                  - !GetAtt InspectionTicketsTable.Arn
+                  - !Sub "${InspectionTicketsTable.Arn}/index/*"
+                  - !GetAtt InspectionLeadsTable.Arn
+                  - !Sub "${InspectionLeadsTable.Arn}/index/*"
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                  - s3:DeleteObject
+                Resource: !Sub "${SelfiesBucket.Arn}/*"
+      Tags:
+        - { Key: Owner, Value: !Ref OwnerTag }
+        - { Key: Project, Value: drivecheck }
+        - { Key: Env, Value: !Ref Stage }
+
+  # ---------- API ----------
+  Api:
+    Type: AWS::Serverless::Api
+    Properties:
+      Name: !Sub drivecheck-api-${Stage}
+      StageName: !Ref Stage
+      Auth:
+        ApiKeyRequired: true
+        UsagePlan:
+          CreateUsagePlan: PER_API
+          UsagePlanName: !Sub drivecheck-${Stage}-plan
+          Quota: { Limit: 50000, Period: MONTH }
+          Throttle: { BurstLimit: 50, RateLimit: 20 }
+      Tags:
+        Owner: !Ref OwnerTag
+        Project: drivecheck
+        Env: !Ref Stage
+
+  # ---------- Shared layer ----------
+  UtilitiesLayer:
+    Type: AWS::Serverless::LayerVersion
+    Properties:
+      LayerName: !Sub drivecheck-utilities-${Stage}
+      Description: Shared response/logger/secrets/dynamo helpers.
+      ContentUri: shared/utilities/nodejs/
+      CompatibleRuntimes: [nodejs20.x]
+      RetentionPolicy: Delete
+    Metadata:
+      BuildMethod: nodejs20.x
+
+  # ---------- Lambdas: Auth ----------
+  RequestOtpFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub drivecheck-auth-requestOtp-${Stage}
+      CodeUri: auth/requestOtp/
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Events:
+        Post:
+          Type: Api
+          Properties:
+            RestApiId: !Ref Api
+            Path: /auth/request-otp
+            Method: POST
+      Tags: { Owner: !Ref OwnerTag, Project: drivecheck }
+
+  VerifyOtpFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub drivecheck-auth-verifyOtp-${Stage}
+      CodeUri: auth/verifyOtp/
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Events:
+        Post:
+          Type: Api
+          Properties:
+            RestApiId: !Ref Api
+            Path: /auth/verify-otp
+            Method: POST
+      Tags: { Owner: !Ref OwnerTag, Project: drivecheck }
+
+  GetMeFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub drivecheck-auth-getMe-${Stage}
+      CodeUri: auth/getMe/
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Events:
+        Get:
+          Type: Api
+          Properties:
+            RestApiId: !Ref Api
+            Path: /auth/me
+            Method: GET
+      Tags: { Owner: !Ref OwnerTag, Project: drivecheck }
+
+  UpdateMeFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub drivecheck-auth-updateMe-${Stage}
+      CodeUri: auth/updateMe/
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Events:
+        Patch:
+          Type: Api
+          Properties:
+            RestApiId: !Ref Api
+            Path: /auth/me
+            Method: PATCH
+      Tags: { Owner: !Ref OwnerTag, Project: drivecheck }
+
+  LogoutFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub drivecheck-auth-logout-${Stage}
+      CodeUri: auth/logout/
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Events:
+        Post:
+          Type: Api
+          Properties:
+            RestApiId: !Ref Api
+            Path: /auth/logout
+            Method: POST
+      Tags: { Owner: !Ref OwnerTag, Project: drivecheck }
+
+  # ---------- Lambdas: Uploads ----------
+  UploadSelfieFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub drivecheck-uploads-selfie-${Stage}
+      CodeUri: uploads/uploadSelfie/
+      Handler: index.handler
+      Timeout: 30
+      MemorySize: 1024
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Events:
+        Post:
+          Type: Api
+          Properties:
+            RestApiId: !Ref Api
+            Path: /uploads/selfie
+            Method: POST
+      Tags: { Owner: !Ref OwnerTag, Project: drivecheck }
+
+  # ---------- Lambdas: AI ----------
+  AnalyzeImageFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub drivecheck-ai-analyzeImage-${Stage}
+      CodeUri: ai/analyzeImage/
+      Handler: index.handler
+      Timeout: 60
+      MemorySize: 1024
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Events:
+        Post:
+          Type: Api
+          Properties:
+            RestApiId: !Ref Api
+            Path: /ai/analyze-image
+            Method: POST
+      Tags:
+        Owner: !Ref OwnerTag
+        Project: drivecheck
+
+  TranscribeAudioFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub drivecheck-ai-transcribeAudio-${Stage}
+      CodeUri: ai/transcribeAudio/
+      Handler: index.handler
+      Timeout: 30
+      MemorySize: 1024
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Events:
+        Post:
+          Type: Api
+          Properties:
+            RestApiId: !Ref Api
+            Path: /ai/transcribe
+            Method: POST
+      Tags:
+        Owner: !Ref OwnerTag
+        Project: drivecheck
+
+  TextToSpeechFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub drivecheck-ai-tts-${Stage}
+      CodeUri: ai/textToSpeech/
+      Handler: index.handler
+      Timeout: 30
+      MemorySize: 1024
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Events:
+        Post:
+          Type: Api
+          Properties:
+            RestApiId: !Ref Api
+            Path: /ai/tts
+            Method: POST
+      Tags:
+        Owner: !Ref OwnerTag
+        Project: drivecheck
+
+  # gpt-4o test-drive answer parser. Takes a Whisper transcription +
+  # the question text + allowed categorical values, returns the chosen
+  # bucket plus a spoken acknowledgment for TTS read-back. Used by the
+  # hands-free conversational inspection on the test-drive step.
+  AnalyzeAnswerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub drivecheck-ai-analyzeAnswer-${Stage}
+      CodeUri: ai/analyzeAnswer/
+      Handler: index.handler
+      Timeout: 30
+      MemorySize: 1024
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Events:
+        Post:
+          Type: Api
+          Properties:
+            RestApiId: !Ref Api
+            Path: /ai/analyze-answer
+            Method: POST
+      Tags:
+        Owner: !Ref OwnerTag
+        Project: drivecheck
+
+  # gpt-4o-audio-preview engine-health analyser. Heavier timeout than
+  # the other AI calls because audio inference is slower than image
+  # inference — a 15-second clip typically takes 8-15s to come back.
+  AnalyzeEngineSoundFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub drivecheck-ai-analyzeEngineSound-${Stage}
+      CodeUri: ai/analyzeEngineSound/
+      Handler: index.handler
+      Timeout: 90
+      MemorySize: 1024
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Events:
+        Post:
+          Type: Api
+          Properties:
+            RestApiId: !Ref Api
+            Path: /ai/analyze-engine-sound
+            Method: POST
+      Tags:
+        Owner: !Ref OwnerTag
+        Project: drivecheck
+
+  ListInspectionsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub drivecheck-inspections-list-${Stage}
+      CodeUri: inspections/listInspections/
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Events:
+        Get:
+          Type: Api
+          Properties:
+            RestApiId: !Ref Api
+            Path: /inspections
+            Method: GET
+      Tags: { Owner: !Ref OwnerTag, Project: drivecheck }
+
+  GetInspectionFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub drivecheck-inspections-get-${Stage}
+      CodeUri: inspections/getInspection/
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Events:
+        Get:
+          Type: Api
+          Properties:
+            RestApiId: !Ref Api
+            Path: /inspections/{id}
+            Method: GET
+      Tags: { Owner: !Ref OwnerTag, Project: drivecheck }
+
+  CreateInspectionFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub drivecheck-inspections-create-${Stage}
+      CodeUri: inspections/createInspection/
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Events:
+        Post:
+          Type: Api
+          Properties:
+            RestApiId: !Ref Api
+            Path: /inspections
+            Method: POST
+      Tags: { Owner: !Ref OwnerTag, Project: drivecheck }
+
+  UpdateInspectionStepFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub drivecheck-inspections-updateStep-${Stage}
+      CodeUri: inspections/updateInspectionStep/
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Events:
+        Post:
+          Type: Api
+          Properties:
+            RestApiId: !Ref Api
+            Path: /inspections/{id}/steps/{stepId}
+            Method: POST
+      Tags: { Owner: !Ref OwnerTag, Project: drivecheck }
+
+  UploadInspectionStepMediaFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub drivecheck-inspections-uploadStepMedia-${Stage}
+      CodeUri: inspections/uploadStepMedia/
+      Handler: index.handler
+      Timeout: 30
+      MemorySize: 1024
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Events:
+        Post:
+          Type: Api
+          Properties:
+            RestApiId: !Ref Api
+            Path: /inspections/{id}/steps/{stepId}/media
+            Method: POST
+      Tags: { Owner: !Ref OwnerTag, Project: drivecheck }
+
+  ListInspectionStepsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub drivecheck-inspections-listSteps-${Stage}
+      CodeUri: inspections/listInspectionSteps/
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Events:
+        Get:
+          Type: Api
+          Properties:
+            RestApiId: !Ref Api
+            Path: /inspections/{id}/steps
+            Method: GET
+      Tags: { Owner: !Ref OwnerTag, Project: drivecheck }
+
+  CompleteInspectionFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub drivecheck-inspections-complete-${Stage}
+      CodeUri: inspections/completeInspection/
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Events:
+        Post:
+          Type: Api
+          Properties:
+            RestApiId: !Ref Api
+            Path: /inspections/{id}/complete
+            Method: POST
+      Tags: { Owner: !Ref OwnerTag, Project: drivecheck }
+
+  GetInspectionReportFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub drivecheck-inspections-report-${Stage}
+      CodeUri: inspections/getInspectionReport/
+      Handler: index.handler
+      # Longer timeout — the report aggregates inspection data and
+      # synchronously calls gpt-4o for pricing + jockey pitch. The
+      # text-only call usually returns in 3-8s but worst-case retries
+      # can push to ~20s; 60s leaves comfortable headroom.
+      Timeout: 60
+      MemorySize: 1024
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Events:
+        Get:
+          Type: Api
+          Properties:
+            RestApiId: !Ref Api
+            Path: /inspections/{id}/report
+            Method: GET
+      Tags: { Owner: !Ref OwnerTag, Project: drivecheck }
+
+  # Closed-deal write — customer agreed to the AI price. Snapshots
+  # the full inspection (parent + every step row) onto the lead so
+  # procurement has a self-contained record.
+  CreateInspectionLeadFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub drivecheck-inspections-createLead-${Stage}
+      CodeUri: inspections/createInspectionLead/
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Events:
+        Post:
+          Type: Api
+          Properties:
+            RestApiId: !Ref Api
+            Path: /inspections/{id}/leads
+            Method: POST
+      Tags: { Owner: !Ref OwnerTag, Project: drivecheck }
+
+  # Decision-of-record write after the jockey reads the AI report to
+  # the customer. Lightweight — one DDB Put + a soft status update.
+  CreateInspectionTicketFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub drivecheck-inspections-createTicket-${Stage}
+      CodeUri: inspections/createInspectionTicket/
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Events:
+        Post:
+          Type: Api
+          Properties:
+            RestApiId: !Ref Api
+            Path: /inspections/{id}/tickets
+            Method: POST
+      Tags: { Owner: !Ref OwnerTag, Project: drivecheck }
+
+  # ---------- Admin list endpoints ----------
+  # Read-only "list all" + per-inspection list endpoints powering the
+  # admin panel (jockeys / tickets / leads pages). Additive: none of
+  # the existing routes/functions change. Scans are hackathon-grade
+  # (small tables); revisit with date-keyed GSIs before prod scale.
+
+  ListJockeysFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub drivecheck-users-listJockeys-${Stage}
+      CodeUri: users/listJockeys/
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Events:
+        Get:
+          Type: Api
+          Properties:
+            RestApiId: !Ref Api
+            Path: /jockeys
+            Method: GET
+      Tags: { Owner: !Ref OwnerTag, Project: drivecheck }
+
+  ListTicketsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub drivecheck-inspections-listTickets-${Stage}
+      CodeUri: inspections/listTickets/
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Events:
+        Get:
+          Type: Api
+          Properties:
+            RestApiId: !Ref Api
+            Path: /tickets
+            Method: GET
+      Tags: { Owner: !Ref OwnerTag, Project: drivecheck }
+
+  ListLeadsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub drivecheck-inspections-listLeads-${Stage}
+      CodeUri: inspections/listLeads/
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Events:
+        Get:
+          Type: Api
+          Properties:
+            RestApiId: !Ref Api
+            Path: /leads
+            Method: GET
+      Tags: { Owner: !Ref OwnerTag, Project: drivecheck }
+
+  ListInspectionTicketsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub drivecheck-inspections-listInspectionTickets-${Stage}
+      CodeUri: inspections/listInspectionTickets/
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Events:
+        Get:
+          Type: Api
+          Properties:
+            RestApiId: !Ref Api
+            Path: /inspections/{id}/tickets
+            Method: GET
+      Tags: { Owner: !Ref OwnerTag, Project: drivecheck }
+
+  ListInspectionLeadsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub drivecheck-inspections-listInspectionLeads-${Stage}
+      CodeUri: inspections/listInspectionLeads/
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Events:
+        Get:
+          Type: Api
+          Properties:
+            RestApiId: !Ref Api
+            Path: /inspections/{id}/leads
+            Method: GET
+      Tags: { Owner: !Ref OwnerTag, Project: drivecheck }
+
+  # ---------- Real-time fan-out (AppSync) ----------
+  # Minimal real-time slice for the Flutter home page: every change to
+  # the Inspections table triggers a push to subscribed clients via
+  # AppSync GraphQL subscriptions. Scope: just the Inspection entity
+  # right now — steps / tickets / leads stay REST-only for the moment.
+  #
+  # Auth: API_KEY (hackathon-friendly). The mobile app embeds the
+  # key + uses it for both connection-init and subscription auth.
+  # Tighten to Cognito User Pools or IAM once we have real users.
+
+  RealtimeApi:
+    Type: AWS::AppSync::GraphQLApi
+    Properties:
+      Name: !Sub drivecheck-realtime-${Stage}
+      AuthenticationType: API_KEY
+      # Lambda → AppSync mutation calls authenticate with IAM (SigV4)
+      # so the publisher doesn't need to know the rotating API key.
+      AdditionalAuthenticationProviders:
+        - AuthenticationType: AWS_IAM
+      Tags:
+        - { Key: Owner, Value: !Ref OwnerTag }
+        - { Key: Project, Value: drivecheck }
+
+  RealtimeApiKey:
+    Type: AWS::AppSync::ApiKey
+    Properties:
+      ApiId: !GetAtt RealtimeApi.ApiId
+      Description: Client-facing key for the Flutter app's subscription
+      # 1 year — rotate before expiry. Default is 7 days which is too short for a deploy cadence.
+      Expires: 0  # 0 means default 7-day; bump to a real unix ts for longer
+
+  RealtimeSchema:
+    Type: AWS::AppSync::GraphQLSchema
+    Properties:
+      ApiId: !GetAtt RealtimeApi.ApiId
+      Definition: |
+        type Inspection {
+          id: ID!
+          assignedTo: String!
+          status: String!
+          completedStepCount: Int
+          stepCount: Int
+          carTitle: String
+          customerName: String
+          scheduledAt: String
+          updatedAt: String
+        }
+
+        # publishInspectionChanged is the ONLY mutation, called by the
+        # publisher Lambda via SigV4-signed IAM auth. Clients can't
+        # call it (no @aws_api_key directive). Pass through input → fire
+        # subscription.
+        type Mutation {
+          publishInspectionChanged(input: InspectionInput!): Inspection
+            @aws_iam
+        }
+
+        input InspectionInput {
+          id: ID!
+          assignedTo: String!
+          status: String!
+          completedStepCount: Int
+          stepCount: Int
+          carTitle: String
+          customerName: String
+          scheduledAt: String
+          updatedAt: String
+        }
+
+        # Clients subscribe by their own userId — AppSync filters
+        # server-side so jockey A never sees jockey B's events.
+        type Subscription {
+          onInspectionsForJockey(assignedTo: String!): Inspection
+            @aws_subscribe(mutations: ["publishInspectionChanged"])
+            @aws_api_key
+        }
+
+        schema {
+          query: Query
+          mutation: Mutation
+          subscription: Subscription
+        }
+
+        # AppSync requires a query type even if unused; clients only
+        # subscribe + the publisher only mutates.
+        type Query {
+          _empty: String
+        }
+
+  # NONE-type data source — the mutation has no backend persistence,
+  # it just exists to trigger the subscription.
+  RealtimeNoneDataSource:
+    Type: AWS::AppSync::DataSource
+    Properties:
+      ApiId: !GetAtt RealtimeApi.ApiId
+      Name: PublishNoOp
+      Type: NONE
+
+  # Resolver: pass the input straight through. AppSync calls this when
+  # the publisher Lambda invokes the mutation; the return value
+  # becomes the subscription payload.
+  PublishInspectionResolver:
+    Type: AWS::AppSync::Resolver
+    DependsOn: RealtimeSchema
+    Properties:
+      ApiId: !GetAtt RealtimeApi.ApiId
+      TypeName: Mutation
+      FieldName: publishInspectionChanged
+      DataSourceName: !GetAtt RealtimeNoneDataSource.Name
+      RequestMappingTemplate: |
+        {
+          "version": "2017-02-28",
+          "payload": $util.toJson($ctx.args.input)
+        }
+      ResponseMappingTemplate: |
+        $util.toJson($ctx.result)
+
+  # Publisher Lambda — subscribed to the Inspections DDB stream,
+  # SigV4-signs a GraphQL mutation call on the AppSync HTTP endpoint
+  # for every NEW_IMAGE the stream emits.
+  PublishInspectionFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub drivecheck-realtime-publishInspection-${Stage}
+      CodeUri: realtime/publishInspection/
+      Handler: index.handler
+      Timeout: 15
+      MemorySize: 512
+      Environment:
+        Variables:
+          APPSYNC_GRAPHQL_URL: !GetAtt RealtimeApi.GraphQLUrl
+          APPSYNC_API_ARN: !GetAtt RealtimeApi.Arn
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: appsync:GraphQL
+              Resource: !Sub "${RealtimeApi.Arn}/types/Mutation/fields/publishInspectionChanged"
+      Events:
+        InspectionsStream:
+          Type: DynamoDB
+          Properties:
+            Stream: !GetAtt InspectionsTable.StreamArn
+            StartingPosition: LATEST
+            BatchSize: 25
+            MaximumRetryAttempts: 2
+      Tags: { Owner: !Ref OwnerTag, Project: drivecheck }
+
+Outputs:
+  ApiBaseUrl:
+    Description: Invoke URL for the DriveCheck API.
+    Value: !Sub https://${Api}.execute-api.${AWS::Region}.amazonaws.com/${Stage}
+  ApiKeyId:
+    Description: API key id — fetch its value with `aws apigateway get-api-key --api-key <id> --include-value`.
+    Value: !Ref ApiApiKey
+  LambdaExecutionRoleArn:
+    Description: Single execution role used by every Lambda — give this ARN to DevOps for SCP exemption.
+    Value: !GetAtt LambdaExecutionRole.Arn
+  InspectionsTableName:
+    Value: !Ref InspectionsTable
+  InspectionStepsTableName:
+    Value: !Ref InspectionStepsTable
+  InspectionTicketsTableName:
+    Value: !Ref InspectionTicketsTable
+  InspectionLeadsTableName:
+    Value: !Ref InspectionLeadsTable
+  UsersTableName:
+    Value: !Ref UsersTable
+  UserOtpTableName:
+    Value: !Ref UserOtpTable
+  UserSessionsTableName:
+    Value: !Ref UserSessionsTable
+  SelfiesBucketName:
+    Value: !Ref SelfiesBucket
+  SelfiesPublicBaseUrl:
+    Value: !Sub "https://${SelfiesBucket}.s3.${AWS::Region}.amazonaws.com"
+  OpenAiSecretArn:
+    Value: !Ref OpenAiSecret
+  RealtimeGraphQLUrl:
+    Description: AppSync GraphQL endpoint — embed in the Flutter app for real-time inspection subscriptions.
+    Value: !GetAtt RealtimeApi.GraphQLUrl
+  RealtimeRealtimeUrl:
+    Description: AppSync WebSocket endpoint (derived from GraphQLUrl host).
+    Value: !Sub
+      - wss://${Host}/graphql
+      - { Host: !Select [2, !Split ["/", !GetAtt RealtimeApi.GraphQLUrl]] }
+  RealtimeApiKey:
+    Description: API key the Flutter app uses for subscription auth. Rotate via `aws appsync update-api-key`.
+    Value: !GetAtt RealtimeApiKey.ApiKey
+  AuthSecretArn:
+    Value: !Ref AuthSecret

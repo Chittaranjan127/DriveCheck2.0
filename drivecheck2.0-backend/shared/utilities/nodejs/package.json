@@ -1,0 +1,12 @@
+{
+  "name": "drivecheck-utilities-layer",
+  "version": "1.0.0",
+  "description": "Shared helpers (response, logger, secrets, dynamo) for DriveCheck lambdas.",
+  "private": true,
+  "dependencies": {
+    "@aws-sdk/client-dynamodb": "^3.658.0",
+    "@aws-sdk/client-secrets-manager": "^3.658.0",
+    "@aws-sdk/lib-dynamodb": "^3.658.0",
+    "jsonwebtoken": "^9.0.2"
+  }
+}
