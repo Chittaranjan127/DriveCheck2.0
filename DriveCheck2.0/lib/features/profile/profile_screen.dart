@@ -4,14 +4,11 @@ import 'package:go_router/go_router.dart';
 import 'package:intl/intl.dart';
 
 import '../../core/i18n/translations.dart';
-import '../../core/models/inspection.dart';
-import '../../core/services/ai_assistant_service.dart';
 import '../../core/services/language_service.dart';
 import '../../core/theme/app_colors.dart';
 import '../../core/theme/app_text_styles.dart';
 import '../auth/auth_provider.dart';
 import '../auth/auth_state.dart';
-import '../home/inspections_provider.dart';
 
 /// Profile + preferences page. Hosted as the third bottom-nav tab (the
 /// old top-right avatar bubble was removed).
@@ -35,12 +32,6 @@ class ProfileScreen extends ConsumerWidget {
     }
     final user = auth.user;
     final lang = ref.watch(languageProvider).valueOrNull;
-    final inspections = ref.watch(inspectionsProvider);
-    final completedCount = inspections
-        .where((i) => i.status == InspectionStatus.completed)
-        .length;
-    final aiEnabled =
-        ref.watch(aiAssistantEnabledProvider).valueOrNull ?? true;
     final dateFmt = DateFormat('d MMM yyyy');
 
     return Scaffold(
@@ -90,13 +81,6 @@ class ProfileScreen extends ConsumerWidget {
                     : '—',
                 t: t,
               ),
-              const _Divider(),
-              _InfoRow(
-                icon: Icons.task_alt_rounded,
-                label: t.completedInspectionsCount,
-                value: completedCount.toString(),
-                t: t,
-              ),
             ]),
             const SizedBox(height: 16),
 
@@ -109,21 +93,6 @@ class ProfileScreen extends ConsumerWidget {
                 onTap: () async {
                   await ref.read(languageProvider.notifier).clear();
                   if (context.mounted) context.go('/language');
-                },
-                t: t,
-              ),
-              const _Divider(),
-              _SwitchRow(
-                icon: Icons.auto_awesome_rounded,
-                label: t.disableAiAssistant,
-                hint: t.disableAiAssistantHint,
-                // The toggle reads as "Disable AI", so it's ON when the
-                // assistant is OFF. We negate when reading + writing.
-                value: !aiEnabled,
-                onChanged: (disabled) {
-                  ref
-                      .read(aiAssistantEnabledProvider.notifier)
-                      .setEnabled(!disabled);
                 },
                 t: t,
               ),
@@ -244,18 +213,6 @@ class _Card extends StatelessWidget {
   }
 }
 
-class _Divider extends StatelessWidget {
-  const _Divider();
-  @override
-  Widget build(BuildContext context) => const Divider(
-        height: 1,
-        thickness: 1,
-        indent: 18,
-        endIndent: 18,
-        color: AppColors.divider,
-      );
-}
-
 class _InfoRow extends StatelessWidget {
   final IconData icon;
   final String label;
@@ -333,55 +290,6 @@ class _TapRow extends StatelessWidget {
             ],
           ),
         ),
-      ),
-    );
-  }
-}
-
-class _SwitchRow extends StatelessWidget {
-  final IconData icon;
-  final String label;
-  final String hint;
-  final bool value;
-  final ValueChanged<bool> onChanged;
-  final Translations t;
-  const _SwitchRow({
-    required this.icon,
-    required this.label,
-    required this.hint,
-    required this.value,
-    required this.onChanged,
-    required this.t,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(18, 12, 12, 12),
-      child: Row(
-        children: [
-          Icon(icon, color: AppColors.textPrimary, size: 22),
-          const SizedBox(width: 14),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(label,
-                    style: t.style(AppTextStyles.body)
-                        .copyWith(fontWeight: FontWeight.w600)),
-                const SizedBox(height: 2),
-                Text(hint,
-                    style: t.style(AppTextStyles.caption)
-                        .copyWith(color: AppColors.textSecondary)),
-              ],
-            ),
-          ),
-          Switch.adaptive(
-            value: value,
-            onChanged: onChanged,
-            activeThumbColor: AppColors.primary,
-          ),
-        ],
       ),
     );
   }

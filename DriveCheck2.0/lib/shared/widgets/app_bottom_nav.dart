@@ -18,9 +18,8 @@ class AppBottomNav extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final t = ref.watch(translationsProvider);
     final items = <_NavItem>[
-      _NavItem(label: t.navHome,        icon: Icons.home_outlined,        activeIcon: Icons.home_rounded),
-      _NavItem(label: t.navInspections, icon: Icons.assignment_outlined,  activeIcon: Icons.assignment_rounded),
-      _NavItem(label: t.navProfile,     icon: Icons.person_outline_rounded, activeIcon: Icons.person_rounded),
+      _NavItem(label: t.navHome,    icon: Icons.home_outlined,          activeIcon: Icons.home_rounded),
+      _NavItem(label: t.navProfile, icon: Icons.person_outline_rounded, activeIcon: Icons.person_rounded),
     ];
 
     return Container(
